@@ -1,0 +1,360 @@
+#!/usr/bin/env bash
+
+CONFIG_FILE=docker.conf
+
+
+fn_error() {
+	echo "${1}"
+	return 1
+}
+
+fn_get_config() {
+	unset NAME
+	unset DOCKER_ARGS
+	unset DAEMON
+	unset VOLUME
+	unset PORT
+	unset TRIGGER
+
+	if [ -r "${CONFIG_FILE}" ]; then
+		CONFIG_FILE="${CONFIG_FILE}"
+	elif [ -r "$(pwd)/${CONFIG_FILE}" ]; then
+		CONFIG_FILE="$(pwd)/${CONFIG_FILE}"
+	elif [ -r "$(dirname "${0}")/${CONFIG_FILE}" ]; then
+		CONFIG_FILE="$(dirname "${0}")/${CONFIG_FILE}"
+	elif [ -r "/etc/${CONFIG_FILE}" ]; then
+		CONFIG_FILE="/etc/${CONFIG_FILE}"
+	elif [ -r "/etc/dockercmd/${CONFIG_FILE}" ]; then
+		CONFIG_FILE="/etc/dockercmd/${CONFIG_FILE}"
+	else
+		return
+	fi
+	local name=${1}
+	local start=$(grep -n -i "^\[${name}\]$" "${CONFIG_FILE}" | cut -f 1 -d ':') 
+	if [ -z "${start}" -o "${start}" = "0" ]; then
+		return
+	fi
+	local end=$(grep -i "^\[${name}\]$" -A 32768 "${CONFIG_FILE}" | grep -v -i "^\[${name}\]$" | grep -n -e "^$" -e "^\[" | head -n 1 | cut -f 1 -d ':')
+	if [ -z "${end}" ]; then
+		end=$(cat "${CONFIG_FILE}" | wc -l)
+	fi
+	end=$((start + end - 1))
+	eval $(sed -n "$((${start} + 1)),${end}p" "${CONFIG_FILE}" | grep -v '^#')
+
+	if [ -z "${NAME}" ]; then
+		NAME=forumi0721/arch-${IMAGE_NAME}
+	else
+		NAME=forumi0721/${NAME}
+	fi
+	echo ${NAME}
+}
+
+fn_pull() {
+	docker pull ${NAME}:latest
+}
+
+fn_build() {
+	if [ -z "${TRIGGER}" ]; then
+		fn_error "Cannot found trigger"
+		exit 1
+	fi
+
+	curl -H "Content-Type: application/json" --data '{"build": true}' -X POST "${TRIGGER}"
+}
+
+fn_check_image() {
+	if [ -z "$(docker images -a | grep "^${NAME}\s\+latest\s\+")" ]; then
+		echo "N"
+	else
+		echo "Y"
+	fi
+}
+
+fn_delete_image() {
+	fn_delete_container
+
+	if [ "$(fn_check_image)" == "Y" ]; then
+		docker rmi --force ${NAME}:latest
+	fi
+}
+
+fn_check_conatiner() {
+	if [ -z "$(docker ps -a -f name=${NAME} | grep -v CONTAINER)" ]; then
+		echo "N"
+	else
+		echo "Y"
+	fi
+}
+
+fn_delete_container() {
+	if [ "$(fn_check_conatiner)" == "Y" ]; then 
+		docker rm -f ${NAME}
+	fi
+}
+
+fn_start() {
+	if [ "$(fn_check_image)" == "N" ]; then
+		fn_pull
+	fi
+
+	if [ "$(fn_check_conatiner)" == "Y" ]; then
+		fn_delete_container
+	fi
+
+	fn_pre_start
+
+	if [ -z "${DAEMON}" -o "${DAEMON}" == "Y" ]; then
+		echo docker run --sig-proxy=false -d $(fn_get_param) ${NAME}:latest
+		docker run --sig-proxy=false -d $(fn_get_param) -h ${NAME} ${NAME}:latest
+	else
+		echo docker run --sig-proxy=false -i -t $(fn_get_param) ${NAME}:latest
+		docker run --sig-proxy=false -i -t $(fn_get_param) -h ${NAME} ${NAME}:latest
+	fi
+}
+
+fn_console() {
+	if [ "$(fn_check_image)" == "N" ]; then
+		fn_pull
+	fi
+
+	if [ "$(fn_check_conatiner)" == "Y" ]; then
+		docker exec -i -t -u root ${NAME} /bin/bash
+	else
+		echo "No container found (${NAME})"
+		fn_pre_start
+		echo docker run --sig-proxy=false -i -t -u root --rm --entrypoint /bin/bash $(fn_get_param) ${NAME}:latest
+		docker run --sig-proxy=false -i -t -u root --rm --entrypoint /bin/bash $(fn_get_param) ${NAME}:latest
+	fi
+}
+
+fn_attach() {
+	if [ "$(fn_check_conatiner)" == "N" ]; then
+		fn_error "Cannot found container"
+		exit 1
+	fi
+
+	echo docker attach --sig-proxy=false  ${NAME}
+	docker attach --sig-proxy=false  ${NAME}
+}
+
+fn_clear() {
+	echo Container
+	if [ "${FORCE}" == "Y" ]; then
+		for id in $(docker ps -a -q)
+		do
+			docker rm -f ${id}
+		done
+	else
+		for id in $(docker ps -a -f status=exited -f status=dead -q)
+		do
+			docker rm -f ${id}
+		done
+	fi
+	echo
+	
+	echo Image
+	if [ "${FORCE}" == "Y" ]; then
+		for id in $(docker images -q)
+		do
+			docker rmi -f ${id}
+		done
+	else
+		for id in $(docker images --filter "dangling=true" -q)
+		do
+			docker rmi -f ${id}
+		done
+	fi
+	echo
+}
+
+fn_test() {
+	if [ ! -e "Dockerfile" ]; then
+		echo "Cannot found Dockerfile"
+		exit 1
+	fi
+	local NAME="$(basename "$(pwd)")"
+	if [ "${NAME}" != "${NAME/docker-/}" ]; then
+		NAME="forumi0721/arch-${NAME/docker-/}"
+	fi
+	if [ ! -z "$(docker ps -a -f name=${NAME} | grep -v CONTAINER)" ]; then
+		docker rm -f ${NAME}
+	fi
+
+	if [ ! -z "$(docker images -a | grep "^${NAME}\s\+latest\s\+")" ]; then
+		if [ ! -z "$(docker images -a | grep "^${NAME}\s\+temp\s\+")" ]; then
+			docker rmi -f ${NAME}:temp
+		fi
+		docker tag ${NAME}:latest ${NAME}:temp
+		docker rmi ${NAME}:latest
+	fi
+
+	if [ "${FORCE}" == "Y" ]; then
+		docker build --force-rm --no-cache -t ${NAME}:latest .
+	else
+		docker build -t ${NAME}:latest .
+	fi
+
+	if [ ! -z "$(docker images -a | grep "^${NAME}\s\+temp\s\+")" ]; then
+		docker rmi -f ${NAME}:temp
+	fi
+}
+
+fn_docker() {
+	docker "$@"
+}
+
+fn_get_param() {
+	local param=
+	for port in ${PORT[@]}
+	do
+		param=$(echo ${param} -p ${port})
+	done
+	for volume in ${VOLUME[@]}
+	do
+		v_array=()
+		IFS=","
+		for v in ${volume}
+		do
+			v_array+=(${v})
+		done
+		unset IFS
+
+		if [ "${v_array[0]:0:1}" == "/" ]; then
+			param=$(echo ${param} -v ${v_array[0]}:${v_array[1]})
+		else
+			param=$(echo ${param} -v ${BASEDIR}/${v_array[0]}:${v_array[1]})
+		fi
+	done
+	if [ ! -z "${DOCKER_ARGS}" ]; then
+		param=$(echo ${param} ${DOCKER_ARGS})
+	fi
+	local hostname=$(cut -f 2 -d '/' <<< ${NAME})
+	hostname=${hostname:-${NAME}}
+	param=$(echo ${param} -h ${hostname} --name ${hostname})
+	echo ${param}
+}
+
+fn_pre_start() {
+	for volume in ${VOLUME[@]}
+	do
+		v_array=()
+		IFS=","
+		for v in ${volume}
+		do
+			v_array+=(${v})
+		done
+		unset IFS
+
+		local v_path=
+		if [ "${v_array[0]:0:1}" == "/" ]; then
+			v_path=${v_array[0]}
+		else
+			v_path=${BASEDIR}/${v_array[0]}
+		fi
+
+		if [ ! -z "${v_array[2]}" ]; then
+			if [ "${v_array[2]}" == "D" ]; then
+				if [ ! -d "${v_path}" ]; then 
+					rm -rf "${v_path}"
+					mkdir -p "${v_path}"
+				fi
+			elif [ "${v_array[2]}" == "F" ]; then
+				if [ ! -f "${v_path}" ]; then
+					rm -rf "${v_path}"
+					touch "${v_path}"
+				fi
+			fi
+		fi
+
+		if [ ! -z "${v_array[3]}" ]; then
+			sudo chown -R ${v_array[3]} "${v_path}"
+		fi
+	done
+}
+
+BASEDIR=$(dirname $(realpath ${0}))
+COMMAND=
+IMAGE_NAME=
+FORCE=
+
+COMMAND="${1}"
+IMAGE_NAME="${2}"
+
+fn_get_config "${IMAGE_NAME}"
+NAME=${NAME:-forumi0721/arch-${IMAGE_NAME}}
+
+if [ ! -z "${NAME}" ]; then
+	echo "NAME : ${NAME}"
+fi
+if [ ! -z "${DOCKER_ARGS}" ]; then
+	echo "DOCKER_ARGS : ${DOCKER_ARGS}"
+fi
+if [ ! -z "${DAEMON}" ]; then
+	echo "DAEMON : ${DAEMON}"
+fi
+if [ ! -z "${VOLUME[@]}" ]; then
+	echo "VOLUME : ${VOLUME[@]}"
+fi
+if [ ! -z "${PORT[@]}" ]; then
+	echo "PORT : ${PORT[@]}"
+fi
+if [ ! -z "${TRIGGER}" ]; then
+	echo "TRIGGER : ${TRIGGER}"
+fi
+echo
+
+#if [ "${COMMAND}" != "test" -a "${COMMAND}" != "clear" -a -z "${NAME}" ]; then
+#	fn_docker "$@"
+#	exit $?
+#fi
+
+while [ $# -gt 0 ]
+do
+	key="$1"
+
+	case $key in
+		-f|--force)
+			FORCE=Y
+			#shift # past argument
+			;;
+		*)
+			# unknown option
+			;;
+	esac
+	shift # past argument or value
+done
+
+case "${COMMAND}" in
+	"pull")
+		fn_pull
+		;;
+	"build")
+		fn_build
+		;;
+	"rmi")
+		fn_delete_image
+		;;
+	"rm")
+		fn_delete_container
+		;;
+	"start")
+		fn_start
+		;;
+	"console")
+		fn_console
+		;;
+	"attach")
+		fn_attach
+		;;
+	"clear")
+		fn_clear
+		;;
+	"test")
+		fn_test
+		;;
+	*)
+		fn_docker "$@"
+		;;
+esac
+
+exit $?
