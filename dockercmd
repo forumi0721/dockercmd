@@ -15,6 +15,7 @@ fn_get_config() {
 	unset VOLUME
 	unset PORT
 	unset TRIGGER
+	unset AUTOSTART
 
 	if [ -r "${CONFIG_FILE}" ]; then
 		CONFIG_FILE="${CONFIG_FILE}"
@@ -46,7 +47,6 @@ fn_get_config() {
 	else
 		NAME=forumi0721/${NAME}
 	fi
-	echo ${NAME}
 }
 
 fn_pull() {
@@ -79,7 +79,9 @@ fn_delete_image() {
 }
 
 fn_check_conatiner() {
-	if [ -z "$(docker ps -a -f name=${NAME} | grep -v CONTAINER)" ]; then
+	local NAME_C=$(cut -f 2 -d '/' <<< ${NAME})
+	NAME_C=${NAME_C:-${NAME}}
+	if [ -z "$(docker ps -a -f name=${NAME_C} | grep -v CONTAINER)" ]; then
 		echo "N"
 	else
 		echo "Y"
@@ -88,7 +90,9 @@ fn_check_conatiner() {
 
 fn_delete_container() {
 	if [ "$(fn_check_conatiner)" == "Y" ]; then 
-		docker rm -f ${NAME}
+		local NAME_C=$(cut -f 2 -d '/' <<< ${NAME})
+		NAME_C=${NAME_C:-${NAME}}
+		docker rm -f ${NAME_C}
 	fi
 }
 
@@ -105,10 +109,10 @@ fn_start() {
 
 	if [ -z "${DAEMON}" -o "${DAEMON}" == "Y" ]; then
 		echo docker run --sig-proxy=false -d $(fn_get_param) ${NAME}:latest
-		docker run --sig-proxy=false -d $(fn_get_param) -h ${NAME} ${NAME}:latest
+		docker run --sig-proxy=false -d $(fn_get_param) ${NAME}:latest
 	else
 		echo docker run --sig-proxy=false -i -t $(fn_get_param) ${NAME}:latest
-		docker run --sig-proxy=false -i -t $(fn_get_param) -h ${NAME} ${NAME}:latest
+		docker run --sig-proxy=false -i -t $(fn_get_param) ${NAME}:latest
 	fi
 }
 
@@ -272,6 +276,17 @@ fn_pre_start() {
 	done
 }
 
+fn_autostart() {
+	for IMAGE_NAME in $(grep '^\[' ${CONFIG_FILE} | sed 's/\[\(.*\)\]/\1/g')
+	do
+		fn_get_config ${IMAGE_NAME}
+
+		if [ ! -z "${NAME}" -a "${AUTOSTART}" == "Y" ]; then
+			fn_start &
+		fi
+	done
+}
+
 BASEDIR=$(dirname $(realpath ${0}))
 COMMAND=
 IMAGE_NAME=
@@ -283,25 +298,34 @@ IMAGE_NAME="${2}"
 fn_get_config "${IMAGE_NAME}"
 NAME=${NAME:-forumi0721/arch-${IMAGE_NAME}}
 
-if [ ! -z "${NAME}" ]; then
+ECHO=N
+if [ ! -z "${NAME}" -a "${NAME}" != "forumi0721/arch-" ]; then
 	echo "NAME : ${NAME}"
+	ECHO=Y
 fi
 if [ ! -z "${DOCKER_ARGS}" ]; then
 	echo "DOCKER_ARGS : ${DOCKER_ARGS}"
+	ECHO=Y
 fi
 if [ ! -z "${DAEMON}" ]; then
 	echo "DAEMON : ${DAEMON}"
+	ECHO=Y
 fi
 if [ ! -z "${VOLUME[@]}" ]; then
 	echo "VOLUME : ${VOLUME[@]}"
+	ECHO=Y
 fi
 if [ ! -z "${PORT[@]}" ]; then
 	echo "PORT : ${PORT[@]}"
+	ECHO=Y
 fi
 if [ ! -z "${TRIGGER}" ]; then
 	echo "TRIGGER : ${TRIGGER}"
+	ECHO=Y
 fi
-echo
+if [ "${ECHO}" == "Y" ]; then
+	echo
+fi
 
 #if [ "${COMMAND}" != "test" -a "${COMMAND}" != "clear" -a -z "${NAME}" ]; then
 #	fn_docker "$@"
@@ -325,6 +349,9 @@ do
 done
 
 case "${COMMAND}" in
+	"autostart")
+		fn_autostart
+		;;
 	"pull")
 		fn_pull
 		;;
